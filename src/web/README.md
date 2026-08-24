@@ -1,0 +1,284 @@
+# Web Viewer
+
+The web viewer module in OpenROAD (`web`) provides a browser-based interface
+for exploring chip layouts and performing design analysis. It renders the design
+as PNG tiles served over WebSocket, enabling smooth zoom and pan of large
+designs without a native GUI.
+
+## Commands
+
+```{note}
+- Parameters in square brackets `[-param param]` are optional.
+- Parameters without square brackets `-param2 param2` are required.
+```
+
+### Web Server
+
+Start the web viewer server. This opens a WebSocket server and launches the
+viewer in the default browser. The command blocks until the server stops, so
+the design can be explored interactively; Tcl commands typed in the browser
+console run on the server.
+
+```tcl
+web_server
+    [-port port]
+    [-stop]
+```
+
+#### Options
+
+| Switch Name | Description |
+| ---------- | -------------------------------------------------- |
+| `-port` | TCP port to listen on. Default: `0`, which picks a free port. |
+| `-stop` | Stop a running server and return from the blocked `web_server` call. |
+| `-dir` | Deprecated and ignored; the web assets are embedded in the binary. |
+
+### Save Image
+
+Save the layout to a PNG file. By default, the command uses the GUI (Qt)
+renderer. Pass `-web` to use the web tile renderer instead, which runs
+entirely server-side without a display and is suitable for headless CI.
+
+```tcl
+save_image
+    [-web]
+    [-area {x0 y0 x1 y1}]
+    [-width width]
+    [-resolution microns_per_pixel]
+    [-display_option option]
+    path
+```
+
+#### Options
+
+| Switch Name | Description |
+| -------------- | ---------------------------------------------- |
+| `-web` | Use the web tile renderer instead of the GUI renderer. Does not require a display or a running web server. |
+| `-area` | Bounding box in microns `{x0 y0 x1 y1}`. Default: die area (with 5% margin in `-web` mode). |
+| `-width` | Output image width in pixels. Cannot be used with `-resolution`. |
+| `-resolution` | Resolution in microns per pixel. Minimum: 1 DBU per pixel. Cannot be used with `-width`. |
+| `-display_option` | Repeatable visibility overrides as `{control value}` pairs. See [Display option keys](#display-option-keys) below. |
+| `path` | Output PNG file path. |
+
+When using `-web`, if neither `-width` nor `-resolution` is specified, the
+image defaults to 1024 pixels wide. The maximum image dimension is 16384
+pixels; larger requests are clamped automatically.
+
+#### Display option keys (web mode)
+
+Display options control which elements are rendered when using `-web`.
+Each option is a `{key value}` pair where the key matches a visibility
+field and the value is `true` or `false`.
+
+| Key | Default | Description |
+| --- | ------- | ----------- |
+| `stdcells` | true | Standard cells |
+| `macros` | true | Macros |
+| `routing` | true | Signal routing |
+| `special_nets` | true | Power/ground straps |
+| `pins` | true | Instance pins |
+| `pin_markers` | true | IO pin direction markers |
+| `blockages` | true | Blockages |
+| `net_signal` | true | Signal nets |
+| `net_power` | true | Power nets |
+| `net_clock` | true | Clock nets |
+| `rows` | false | Row outlines |
+| `tracks_pref` | false | Preferred-direction tracks |
+| `rudy` | false | Estimated congestion (RUDY) heatmap overlay |
+
+#### Examples
+
+```tcl
+# Save using the GUI renderer (default)
+save_image layout.png
+
+# Save using the web renderer (headless)
+save_image -web layout.png
+
+# Save at 1024px wide with the web renderer
+save_image -web -width 1024 layout.png
+
+# Save at 0.1 um per pixel
+save_image -web -resolution 0.1 layout.png
+
+# Save a specific region (in microns)
+save_image -web -area {0 0 100 100} -width 2048 region.png
+
+# Hide routing and power nets
+save_image -web -display_option {routing false} \
+                -display_option {net_power false} \
+                layout.png
+
+# Save with RUDY congestion heatmap overlay
+save_image -web -display_option {rudy true} layout_rudy.png
+```
+
+### Save Report
+
+Generate a self-contained HTML timing report. The report uses the same
+JavaScript frontend as the live web viewer but serves all data from a cache
+embedded in the HTML file. No running server is required to view the report.
+
+```tcl
+web_save_report
+    [-setup_paths count]
+    [-hold_paths count]
+    path
+```
+
+#### Options
+
+| Switch Name | Description |
+| ----------- | ------------------------------------------------- |
+| `-setup_paths` | Maximum number of setup timing paths to include. Default: `100`. |
+| `-hold_paths` | Maximum number of hold timing paths to include. Default: `100`. |
+| `path` | Output HTML file path. |
+
+The report includes:
+
+- **Layout view** with pre-rendered tiles at a fixed zoom level. Layer
+  visibility can be toggled using the same display controls as the live viewer.
+  Zoom is disabled; pan is allowed.
+- **Timing table** with setup and hold paths. Clicking a path highlights it
+  on the layout via a pre-rendered overlay image.
+- **Slack histogram** with setup/hold tabs.
+- **Display controls**, hierarchy browser, clock tree, and other panels from
+  the live viewer (features that require server interaction show empty states).
+
+The report requires an internet connection to load Leaflet and GoldenLayout
+CSS/JS from CDN.
+
+#### Examples
+
+```tcl
+# Generate a report with default settings
+web_save_report timing.html
+
+# Include more paths
+web_save_report -setup_paths 200 -hold_paths 200 timing.html
+```
+
+### Save Display Controls
+
+Write the display-controls state of the connected viewer to a JSON file, so a
+particular set of visibility, selectability, layer-pattern and theme choices
+can be reused later or shared.
+
+```tcl
+save_display_controls
+    filename
+```
+
+#### Options
+
+| Switch Name | Description |
+| ----------- | ------------------------------------------------- |
+| `filename` | Output JSON file path. |
+
+The viewer pushes a snapshot of its state to the server whenever a control
+changes, and this command writes the most recent snapshot. It therefore
+requires a running server (`web_server`) with a viewer open; otherwise it
+errors, or warns if no snapshot has arrived yet. The server caches a single
+snapshot, so with several viewers connected the state saved is that of
+whichever one synced last.
+
+Because Tcl commands typed into the browser console run on the server, this is
+normally invoked from the viewer's own console after arranging the panel.
+
+### Restore Display Controls
+
+Apply a previously saved display-controls file to every connected viewer.
+
+```tcl
+restore_display_controls
+    filename
+```
+
+#### Options
+
+| Switch Name | Description |
+| ----------- | ------------------------------------------------- |
+| `filename` | Input JSON file path, as written by `save_display_controls`. |
+
+The state is broadcast to all connected clients, each of which re-applies it
+and reloads, preserving the current camera position. A key absent from the file
+is reset to its default rather than left as-is. The file is validated before it
+is broadcast; a malformed or unexpectedly shaped file is rejected with an error
+and nothing is applied.
+
+Like `save_display_controls`, this requires a running server.
+
+#### Examples
+
+```tcl
+# In the viewer's Tcl console, after setting up the panel
+save_display_controls my_view.json
+
+# Later, in another session with the viewer open
+restore_display_controls my_view.json
+```
+
+## Features
+
+- **Tile-based rendering** — The server renders 256x256 PNG tiles on demand,
+  supporting smooth zoom and pan of designs with millions of instances.
+- **Object inspection** — Click on instances, nets, pins, or other objects to
+  view their properties in an inspector panel. Hover highlights are rendered
+  server-side in tiles.
+- **Timing analysis** — View timing paths with slack, delay, and arrival time
+  metrics. Highlight critical paths on the layout. Slack histogram charts with
+  filtering by path group and clock domain.
+- **Clock tree visualization** — Browse clock tree hierarchy, highlight clock
+  paths, and view per-level statistics.
+- **Hierarchy browser** — Navigate the module tree with instance counts and area
+  statistics. Toggle visibility and assign colors per module using a 31-color
+  palette.
+- **Display controls** — Toggle visibility of cell types (stdcells, macros,
+  pads), net types (signal, power, clock), and shapes (routing, pins, blockages,
+  rows, tracks). The panel state can be saved to and restored from a file with
+  `save_display_controls` / `restore_display_controls`.
+- **Focus nets** — Isolate specific nets for inspection, dimming all other
+  routing.
+- **Tcl console** — Execute Tcl commands interactively from the browser.
+
+## Architecture
+
+The module has two parts:
+
+- **C++ server** (`src/web.cpp`, `src/request_handler.cpp`,
+  `src/tile_generator.cpp`) — A Boost Beast WebSocket server that handles tile
+  rendering, object selection, timing/clock-tree queries, and Tcl evaluation.
+  Tiles are rendered from ODB geometry and encoded as PNG using lodepng.
+
+- **JavaScript frontend** (`src/main.js`, `src/index.html`, `src/style.css`) —
+  A single-page application using Leaflet.js for the map and GoldenLayout for
+  resizable panels. Communicates with the server over a binary WebSocket
+  protocol.
+
+## Server API
+
+The browser↔server protocol (WebSocket message types, request fields,
+response shapes, error contract) is documented in
+[`docs/server-api.md`](docs/server-api.md).
+
+## Example scripts
+
+```tcl
+# Start the web viewer on an OS-assigned port
+web_server
+
+# Start on a fixed port
+web_server -port 8080
+```
+
+## Regression tests
+
+There are a set of regression tests in `./test`.
+
+```shell
+bazel test //src/web/test/...
+```
+
+## License
+
+BSD 3-Clause License. See [LICENSE](../../LICENSE) file.
